@@ -2,7 +2,7 @@
 
 (defprotocol Drawable
   :extend-via-metadata true
-  (draw [this] "Draws the object to the screen. assume the gl thread if calling via (yoyo/draw)"))
+  (draw [this] "Draws the object to the screen. assume the gl thread if calling via (zeno/draw)"))
 
 (defprotocol DrawableSource
   :extend-via-metadata true
