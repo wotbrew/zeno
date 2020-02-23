@@ -156,7 +156,9 @@
 (defn game-loop
   "Returns a new game loop object, it is both Drawable and Handler
   so you can start drawing the game over time with (draw! game-loop) and handle input
-  with (attach! game-loop)"
+  with (attach! game-loop).
+
+  Call (deref game-loop) to sample the value of the game right now."
   [g]
   (let [a (agent g :error-mode :continue)
         playing-fx (atom #{})
@@ -181,11 +183,14 @@
                             :zeno/event-data event
                             :zeno/ex ex})))))]
     (reify
+      IDeref
+      (deref [this] @a)
       p/Handler
       (handle [this event]
         (case (:zeno/event event)
           :zeno.events/new-frame
           (let [delta (:zeno/delta event 0.0)]
+            ;; todo only wait if you have time.
             (when (> delta 4e-3)
               (await-for 4 a))
             (let [fx (:zeno/fx-queue @a PersistentQueue/EMPTY)
