@@ -227,7 +227,9 @@
               now-elapsed (double now-elapsed)
               delta (- now-elapsed elapsed)
               secs-remaining (- secs delta)
-              g (assoc g :zeno/elapsed now-elapsed)
+              q (dissoc q run-time)
+              g (assoc g :zeno/elapsed now-elapsed
+                         ::deferred q)
               g (reduce (fn [g f] (f g)) g run-list)
               g (respond g {:zeno/event :zeno.events/elapsed
                             :zeno/delta delta})]
