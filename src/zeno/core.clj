@@ -421,3 +421,7 @@
                   (throw (Exception. "Could not load Texture from URL" texture)))
 
                 (get @gpu-resources this))))))))
+
+(defn set-window-title
+  [s]
+  (dispatch (fn [] (.setTitle Gdx/graphics (str s)))))
