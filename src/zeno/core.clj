@@ -1,16 +1,28 @@
 (ns zeno.core
   "Core zeno API, provides a context for developing REPL friendly LibGDX applications."
-  (:require [zeno.protocols :as p])
+  (:require [zeno.protocols :as p]
+            [clojure.java.io :as io]
+            [clojure.pprint :as pp])
   (:import (com.badlogic.gdx Gdx Application ApplicationListener InputProcessor)
            (com.badlogic.gdx.backends.lwjgl LwjglApplication)
            (clojure.lang IFn PersistentQueue IDeref)
            (org.lwjgl.opengl GL11)
-           (com.badlogic.gdx.graphics GL20)))
+           (com.badlogic.gdx.graphics GL20 Texture)
+           (com.badlogic.gdx.files FileHandle)
+           (java.io InputStream StringWriter)
+           (java.net URL)
+           (com.badlogic.gdx.utils Disposable Align)
+           (java.util UUID)
+           (zeno Zeno)
+           (com.badlogic.gdx.graphics.g2d BitmapFont)))
+
+(set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (defonce ^:private handlers (atom #{}))
 (defonce ^:private drawing (atom nil))
-(defonce ^:private thread (atom nil))
 (defonce ^:private configuration (atom nil))
+(defonce ^:private gpu-resources (atom {}))
 
 (defn !!configure!!
   "Call once at the very start of your application to provide certain configuration options
@@ -35,24 +47,30 @@
           (keyDown [this gdx-key]
             (handle {:zeno/event :zeno.events/input-down
                      :zeno/gdx-key gdx-key
-                     :zeno/delta-secs (.getDeltaTime Gdx/graphics)}))
+                     :zeno/delta-secs (.getDeltaTime Gdx/graphics)})
+            true)
           (keyUp [this gdx-key]
             (handle {:zeno/event :zeno.events/input-up
-                     :zeno/gdx-key gdx-key}))
+                     :zeno/gdx-key gdx-key})
+            true)
           (keyTyped [this c]
             (handle {:zeno/event :zeno.events/char-typed
-                     :zeno/char-typed c}))
-          (touchDown [this x y gdx-pointer gdx-button])
+                     :zeno/char-typed c})
+            true)
+          (touchDown [this x y gdx-pointer gdx-button]
+            true)
           (touchUp [this x y gdx-pointer gdx-button]
-            )
+            true)
           (touchDragged [this x y gdx-pointer]
-            )
+            true)
           (mouseMoved [this x y]
             (handle {:zeno/event :zeno.events/mouse-moved
-                     :zeno/mouse [x y]}))
+                     :zeno/mouse [x y]})
+            true)
           (scrolled [this gdx-scroll]
             (handle {:zeno/event :zeno.events/mouse-scrolled
-                     :zeno/scroll (* 60.0 gdx-scroll (.getDeltaTime Gdx/graphics))})))
+                     :zeno/scroll (* 60.0 gdx-scroll (.getDeltaTime Gdx/graphics))})
+            true))
 
         thread-bindings (get-thread-bindings)
 
@@ -60,7 +78,7 @@
         (reify ApplicationListener
           (create [this]
             (push-thread-bindings thread-bindings)
-            (reset! thread (Thread/currentThread))
+            (Zeno/init)
             (.setInputProcessor Gdx/input input-processor)
             (handle {:zeno/event :zeno.events/window-resized
                      :zeno/window-size [(.getWidth Gdx/graphics) (.getHeight Gdx/graphics)]})
@@ -70,7 +88,7 @@
             (handle {:zeno/event :zeno.events/window-resized
                      :zeno/window-size [w h]}))
           (render [this]
-            (.glClear GL11 (bit-or GL20/GL_COLOR_BUFFER_BIT GL20/GL_DEPTH_BUFFER_BIT))
+            (GL11/glClear (bit-or GL20/GL_COLOR_BUFFER_BIT GL20/GL_DEPTH_BUFFER_BIT))
             (handle {:zeno/event :zeno.events/new-frame
                      :zeno/delta (.getDeltaTime Gdx/graphics)})
             (when-some [d @drawing]
@@ -90,13 +108,13 @@
   []
   (or Gdx/app
       (locking Gdx
-        (or Gdx/app (gdx)))))
+        (or Gdx/app (start-gdx)))))
 
 (defn dispatch
   "Runs (f) on the LibGDX thread, if you are not already on it. Uncaught exceptions will emit the dispatch-error event,
   always returns nil."
   [f]
-  (if (= @thread (Thread/currentThread))
+  (if (= (Zeno/getGlThread) (Thread/currentThread))
     (try
       (f)
       (catch Throwable ex
@@ -189,8 +207,7 @@
       (handle [this event]
         (case (:zeno/event event)
           :zeno.events/new-frame
-          (let [delta (:zeno/delta event 0.0)]
-            ;; todo only wait if you have time.
+          (let [delta (double (:zeno/delta event 0.0))]
             (when (> delta 4e-3)
               (await-for 4 a))
             (let [fx (:zeno/fx-queue @a PersistentQueue/EMPTY)
@@ -219,7 +236,7 @@
 
   Emits n :zeno.events/elapsed events for each discrete state reached as deferred functions are run."
   [g secs]
-  (if (<= secs 0.0)
+  (if (<= (double secs) 0.0)
     g
     (let [elapsed (:zeno/elapsed g 0.0)
           elapsed (double elapsed)
@@ -248,7 +265,7 @@
 (defn defer
   "Enqueues a function of game to game to run when at least secs elapses via (elapse)."
   ([g secs f]
-   (if (<= secs 0.0)
+   (if (<= (double secs) 0.0)
      (f g)
      (let [q (::deferred g)
            q (or q (sorted-map))
@@ -272,5 +289,135 @@
   (run-fx [this updater] (this updater)))
 
 (extend-protocol p/Drawable
+  nil
+  (draw [this])
   IDeref
   (draw [this] (p/draw @this)))
+
+(defn ^FileHandle
+  input-stream-handle
+  [^InputStream in]
+  (let [name (str (UUID/randomUUID))]
+    (proxy [FileHandle] []
+      (name [] name)
+      (toString [] name)
+      (read [] in)
+      (length [] 0))))
+
+(defn free
+  [id]
+  (when-some [resource (-> @gpu-resources (get id))]
+    (swap! gpu-resources dissoc id)
+    (dispatch
+      (fn []
+        (p/free resource)))))
+
+(defn free-all
+  []
+  (dispatch (fn [] (run! free (keys @gpu-resources)))))
+
+;; general extensions
+(extend-type Disposable
+  p/GPUResource
+  (free [this] (.dispose this)))
+
+(def ^:dynamic *coord-system*
+  "If drawing a scene, bound to the current coord system e.g
+
+  e.g :y-up or :y-down."
+  nil)
+
+(defmulti scene
+  (fn [f coord-system] coord-system))
+
+(defmethod scene :y-down
+  [f _]
+  (reify p/Drawable
+    (draw [this]
+      (binding [*coord-system* :y-down]
+        (let [sb (Zeno/getSpriteBatch)
+              camera (Zeno/getCamera)]
+          (try
+            (.setToOrtho camera true)
+            (.setProjectionMatrix sb (.-combined camera))
+            (.begin sb)
+            (f)
+            (finally
+              (.end sb))))))))
+
+(defmethod scene :y-up
+  [f _]
+  (reify p/Drawable
+    (draw [this]
+      (binding [*coord-system* :y-up]
+        (let [sb (Zeno/getSpriteBatch)
+              camera (Zeno/getCamera)]
+          (try
+            (.setToOrtho camera false)
+            (.setProjectionMatrix sb (.-combined camera))
+            (.begin sb)
+            (f)
+            (finally
+              (.end sb))))))))
+
+;; texture extensions
+(extend-type Texture
+  p/DrawableSource
+  (drawable [this]
+    (scene
+      (fn draw-texture []
+        (let [h (.getHeight Gdx/graphics)
+              th (.getHeight this)
+              x (float 0.0)
+              y (float (- h th))]
+          (.draw (Zeno/getSpriteBatch) this x y)))
+      :y-up)))
+
+(defn- ^BitmapFont get-default-font
+  []
+  (case *coord-system*
+    :y-up (Zeno/getUpFont)
+    (Zeno/getDownFont)))
+
+;; string extension
+(extend-type String
+  p/DrawableSource
+  (drawable [this]
+    (scene
+      (fn draw-string []
+        (let [x (float 0.0)
+              y (float 0.0)
+              w (float (.getWidth Gdx/graphics))]
+          (.draw (get-default-font) (Zeno/getSpriteBatch) this x y w Align/center true)))
+      :y-down)))
+
+;; object extension via pprinter
+(extend-type Object
+  p/DrawableSource
+  (drawable [this]
+    (let [sw (StringWriter.)
+          _ (binding [*print-length* 1000
+                      *print-level* 10]
+              (pp/pprint this sw))
+          s (.toString sw)]
+      (p/drawable s))))
+
+;; url extensions
+(extend-type URL
+  p/DrawableSource
+  (drawable [this]
+    (p/drawable
+      (or (get @gpu-resources this)
+          (locking gpu-resources
+            (or (get @gpu-resources this))
+            (with-open [in (io/input-stream this)]
+              (let [fh (input-stream-handle in)
+                    p (promise)
+                    _ (dispatch (fn [] (deliver p (try (Texture. fh) (catch Throwable e e)))))
+                    texture (deref p 10000 nil)]
+
+                (if (instance? Texture texture)
+                  (swap! gpu-resources assoc this texture)
+                  (throw (Exception. "Could not load Texture from URL" texture)))
+
+                (get @gpu-resources this))))))))

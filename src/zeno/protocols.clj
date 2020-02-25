@@ -19,3 +19,6 @@
 (defprotocol Fx
   :extend-via-metadata true
   (run-fx [this updater] "Implement for FX"))
+
+(defprotocol GPUResource
+  (free [this]))
