@@ -423,5 +423,11 @@
                 (get @gpu-resources this))))))))
 
 (defn set-window-title
+  "Sets the window title to something else."
   [s]
   (dispatch (fn [] (.setTitle Gdx/graphics (str s)))))
+
+(defn set-window-size
+  "Changes the size of the window."
+  [w h]
+  (dispatch (fn [] (.setWindowedMode Gdx/graphics (int w) (int h)))))
