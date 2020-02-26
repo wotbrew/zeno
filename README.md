@@ -1,6 +1,31 @@
 # zeno
 
-A REPL friendly game development library for Clojure.
+A REPL friendly 2D game development library for Clojure.
+
+## At a glance
+
+- REPL friendly, thread-safe API.
+- Your game is a value, immutable and functions on it provided by zeno
+ are pure.
+- Simple graph architecture for game entities.
+- Allows access to LibGDX, but makes some decisions for you
+  to make it easier to develop basic 2d games.
+
+## Hello world
+```clojure
+(require '[zeno.core :as zeno])
+
+(zeno/show! "Hello world")
+```
+
+## Game Architecture
+
+In zeno, your game is a value - in fact 
+a plain hash map. All game logic is to be implemented as pure functions.
+
+Utilities are provided to support side effects, drawing and playing audio.
+
+Events are consumed by your game with a game loop.
 
 ## License
 

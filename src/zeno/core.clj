@@ -2,19 +2,18 @@
   "Core zeno API, provides a context for developing REPL friendly LibGDX applications."
   (:require [zeno.protocols :as p]
             [clojure.java.io :as io]
-            [clojure.pprint :as pp])
+            [clojure.pprint :as pp]
+            [clojure.repl])
   (:import (com.badlogic.gdx Gdx Application ApplicationListener InputProcessor)
            (com.badlogic.gdx.backends.lwjgl LwjglApplication)
            (clojure.lang IFn PersistentQueue IDeref)
-           (org.lwjgl.opengl GL11)
-           (com.badlogic.gdx.graphics GL20 Texture)
+           (com.badlogic.gdx.graphics Texture)
            (com.badlogic.gdx.files FileHandle)
            (java.io InputStream StringWriter)
            (java.net URL)
            (com.badlogic.gdx.utils Disposable Align)
            (java.util UUID)
-           (zeno Zeno)
-           (com.badlogic.gdx.graphics.g2d BitmapFont)))
+           (zeno Zeno)))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -34,7 +33,10 @@
 
 (defn- safe-handle
   [handler event]
-  (p/handle handler event))
+  (try
+    (p/handle handler event)
+    (catch Throwable e
+      (.printStackTrace e System/err))))
 
 (defn- handle
   [event]
@@ -88,15 +90,22 @@
             (handle {:zeno/event :zeno.events/window-resized
                      :zeno/window-size [w h]}))
           (render [this]
-            (GL11/glClear (bit-or GL20/GL_COLOR_BUFFER_BIT GL20/GL_DEPTH_BUFFER_BIT))
             (handle {:zeno/event :zeno.events/new-frame
                      :zeno/delta (.getDeltaTime Gdx/graphics)})
-            (when-some [d @drawing]
-              (try
-                (p/draw d)
-                (catch Throwable e
-                  (handle {:zeno/event :zeno.events/render-error
-                           :zeno/ex e})))))
+            (try
+              (Zeno/begin)
+              (when-some [d @drawing]
+                (p/draw d 0 0 (.getWidth Gdx/graphics) (.getHeight Gdx/graphics)))
+              (catch Throwable e
+                (handle {:zeno/event :zeno.events/render-error
+                         :zeno/ex e})
+                (let [_ (require 'clojure.repl)
+                      writer (StringWriter.)
+                      _ (binding [*err* writer] (clojure.repl/pst e))
+                      s (str writer)]
+                  (Zeno/drawDefaultString s 0.0 0.0 (.getWidth Gdx/graphics) Align/left)))
+              (finally
+                (Zeno/end))))
           (pause [this])
           (resume [this])
           (dispose [this]))]
@@ -140,14 +149,18 @@
   [audio]
   (gdx))
 
-(defn draw!
+(defn show!
   "Draws to the screen. Replaces whatever is currently on the screen. Takes a Drawable or DrawableSource."
   [drawable]
   (gdx)
   (if (satisfies? p/Drawable drawable)
     (reset! drawing drawable)
-    (draw! (p/drawable drawable)))
+    (show! (p/drawable drawable)))
   nil)
+
+(defn draw!
+  [drawable x y w h]
+  (p/draw drawable x y w h))
 
 (defn attach!
   "Attaches a handler to zeno so that it starts receiving events."
@@ -223,9 +236,10 @@
                     new-fx)))
           nil)
         (send a safe-respond event))
-      p/Drawable
-      (draw [this]
-        (draw! @a)))))
+      p/DrawableSource
+      (drawable [this]
+        (fn draw-game [x y w h]
+          )))))
 
 (defn elapse
   "Returns a new game where secs have passed, runs functions queued with (defer).
@@ -290,9 +304,11 @@
 
 (extend-protocol p/Drawable
   nil
-  (draw [this])
+  (draw [this x y w h])
   IDeref
-  (draw [this] (p/draw @this)))
+  (draw [this x y w h] (p/draw @this x y w h))
+  IFn
+  (draw [this x y w h] (this x y w h)))
 
 (defn ^FileHandle
   input-stream-handle
@@ -321,75 +337,17 @@
   p/GPUResource
   (free [this] (.dispose this)))
 
-(def ^:dynamic *coord-system*
-  "If drawing a scene, bound to the current coord system e.g
-
-  e.g :y-up or :y-down."
-  nil)
-
-(defmulti scene
-  (fn [f coord-system] coord-system))
-
-(defmethod scene :y-down
-  [f _]
-  (reify p/Drawable
-    (draw [this]
-      (binding [*coord-system* :y-down]
-        (let [sb (Zeno/getSpriteBatch)
-              camera (Zeno/getCamera)]
-          (try
-            (.setToOrtho camera true)
-            (.setProjectionMatrix sb (.-combined camera))
-            (.begin sb)
-            (f)
-            (finally
-              (.end sb))))))))
-
-(defmethod scene :y-up
-  [f _]
-  (reify p/Drawable
-    (draw [this]
-      (binding [*coord-system* :y-up]
-        (let [sb (Zeno/getSpriteBatch)
-              camera (Zeno/getCamera)]
-          (try
-            (.setToOrtho camera false)
-            (.setProjectionMatrix sb (.-combined camera))
-            (.begin sb)
-            (f)
-            (finally
-              (.end sb))))))))
-
 ;; texture extensions
 (extend-type Texture
-  p/DrawableSource
-  (drawable [this]
-    (scene
-      (fn draw-texture []
-        (let [h (.getHeight Gdx/graphics)
-              th (.getHeight this)
-              x (float 0.0)
-              y (float (- h th))]
-          (.draw (Zeno/getSpriteBatch) this x y)))
-      :y-up)))
-
-(defn- ^BitmapFont get-default-font
-  []
-  (case *coord-system*
-    :y-up (Zeno/getUpFont)
-    (Zeno/getDownFont)))
+  p/Drawable
+  (draw [this x y w h]
+    (Zeno/drawTexture this x y w h)))
 
 ;; string extension
 (extend-type String
-  p/DrawableSource
-  (drawable [this]
-    (scene
-      (fn draw-string []
-        (let [x (float 0.0)
-              y (float 0.0)
-              w (float (.getWidth Gdx/graphics))]
-          (.draw (get-default-font) (Zeno/getSpriteBatch) this x y w Align/center true)))
-      :y-down)))
+  p/Drawable
+  (draw [this x y w _]
+    (Zeno/drawDefaultString this x y w Align/center)))
 
 ;; object extension via pprinter
 (extend-type Object
@@ -400,27 +358,26 @@
                       *print-level* 10]
               (pp/pprint this sw))
           s (.toString sw)]
-      (p/drawable s))))
+      s)))
 
 ;; url extensions
 (extend-type URL
   p/DrawableSource
   (drawable [this]
-    (p/drawable
-      (or (get @gpu-resources this)
-          (locking gpu-resources
-            (or (get @gpu-resources this))
-            (with-open [in (io/input-stream this)]
-              (let [fh (input-stream-handle in)
-                    p (promise)
-                    _ (dispatch (fn [] (deliver p (try (Texture. fh) (catch Throwable e e)))))
-                    texture (deref p 10000 nil)]
+    (or (get @gpu-resources this)
+        (locking gpu-resources
+          (or (get @gpu-resources this))
+          (with-open [in (io/input-stream this)]
+            (let [fh (input-stream-handle in)
+                  p (promise)
+                  _ (dispatch (fn [] (deliver p (try (Texture. fh) (catch Throwable e e)))))
+                  texture (deref p 10000 nil)]
 
-                (if (instance? Texture texture)
-                  (swap! gpu-resources assoc this texture)
-                  (throw (Exception. "Could not load Texture from URL" texture)))
+              (if (instance? Texture texture)
+                (swap! gpu-resources assoc this texture)
+                (throw (Exception. "Could not load Texture from URL" texture)))
 
-                (get @gpu-resources this))))))))
+              (get @gpu-resources this)))))))
 
 (defn set-window-title
   "Sets the window title to something else."

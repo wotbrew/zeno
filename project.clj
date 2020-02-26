@@ -9,4 +9,5 @@
                  [com.badlogicgames.gdx/gdx-backend-lwjgl "1.9.10"]
                  [com.badlogicgames.gdx/gdx-platform "1.9.10"
                   :classifier "natives-desktop"]]
-  :repl-options {:init-ns zeno.core})
+  :repl-options {:init-ns zeno.core}
+  :profiles {:dev {:source-paths ["examples"]}})
